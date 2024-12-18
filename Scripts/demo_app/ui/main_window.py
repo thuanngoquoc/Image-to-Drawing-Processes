@@ -1,5 +1,8 @@
 from PyQt5.QtWidgets import (QMainWindow, QFileDialog, QMessageBox, QWidget, 
                              QVBoxLayout, QPushButton, QLabel, QComboBox, QInputDialog)
+from PyQt5.QtGui import QPixmap, QImage
+from PyQt5.QtCore import Qt, QTimer
+
 import cv2
 import numpy as np
 import os
@@ -9,7 +12,6 @@ from data_io.kaggle_data_handler import KaggleDataHandler
 from segmentation.segment_processor import KaggleSegmentProcessor
 from utils.priority_handler import PriorityHandler
 from utils.image_processor import ImageProcessor
-from ui.drawing_widget import DrawingWidget
 
 class MainWindow(QMainWindow):
     def __init__(self, priority_map=None, dataset_slug="thuanngoquoc/inputdata"):
@@ -32,75 +34,82 @@ class MainWindow(QMainWindow):
         self.data_folder = "data_folder"
         if not os.path.exists(self.data_folder):
             os.makedirs(self.data_folder, exist_ok=True)
-            print(f"Đã tạo thư mục: {self.data_folder}")
-        else:
-            print(f"Đã tồn tại thư mục: {self.data_folder}")
-        
-        metadata_path = os.path.join(self.data_folder, "dataset-metadata.json")
-        if not os.path.exists(metadata_path):
-            print("Cảnh báo: Chưa có dataset-metadata.json trong data_folder!")
-        else:
-            print("Đã tìm thấy dataset-metadata.json trong data_folder.")
-        
+
         self.sketch_data_folder = "sketch_data"
         if not os.path.exists(self.sketch_data_folder):
             os.makedirs(self.sketch_data_folder, exist_ok=True)
 
-        # Giao diện chính
+        self.background_image = cv2.imread("background.jpg")
+        if self.background_image is None:
+            self.background_image = np.ones((1080, 1920, 3), dtype=np.uint8)*255
+        else:
+            self.background_image = cv2.resize(self.background_image, (1920, 1080))
+
         central_widget = QWidget()
-        layout = QVBoxLayout()
+        self.layout = QVBoxLayout()
 
         self.label_info = QLabel("Chọn nguồn ảnh")
-        layout.addWidget(self.label_info)
+        self.layout.addWidget(self.label_info)
 
         self.source_combo = QComboBox()
         self.source_combo.addItem("Local (máy tính)")
         self.source_combo.addItem("URL (đường link Internet)")
         self.source_combo.addItem("Camera (Webcam)")
-        layout.addWidget(self.source_combo)
+        self.layout.addWidget(self.source_combo)
 
         self.btn_choose_image = QPushButton("Load Ảnh")
         self.btn_choose_image.clicked.connect(self.choose_image_source)
-        layout.addWidget(self.btn_choose_image)
+        self.layout.addWidget(self.btn_choose_image)
 
-        # Nút nhập kích thước
         self.btn_resize = QPushButton("Resize Ảnh")
         self.btn_resize.clicked.connect(self.resize_image_dialog)
         self.btn_resize.setEnabled(False)
-        layout.addWidget(self.btn_resize)
+        self.layout.addWidget(self.btn_resize)
 
-        # Nút upload lên Kaggle
         self.btn_upload = QPushButton("Upload lên Kaggle")
         self.btn_upload.clicked.connect(self.upload_to_kaggle)
         self.btn_upload.setEnabled(False)
-        layout.addWidget(self.btn_upload)
+        self.layout.addWidget(self.btn_upload)
 
-        # Nút chuyển thành Sketch
         self.btn_to_sketch = QPushButton("Chuyển thành Sketch")
         self.btn_to_sketch.clicked.connect(self.convert_to_sketch)
         self.btn_to_sketch.setEnabled(False)
-        layout.addWidget(self.btn_to_sketch)
+        self.layout.addWidget(self.btn_to_sketch)
 
-        # Nút bắt đầu vẽ
+        # Sau khi chuyển thành sketch, sẽ hiển thị ảnh + nút bắt đầu vẽ
+        self.image_label = QLabel()
+        self.layout.addWidget(self.image_label)
+        self.image_label.setVisible(False)  # Ẩn lúc đầu
+
         self.btn_start_drawing = QPushButton("Bắt đầu Vẽ")
-        self.btn_start_drawing.clicked.connect(self.start_drawing)
-        self.btn_start_drawing.setEnabled(False)
-        layout.addWidget(self.btn_start_drawing)
+        self.btn_start_drawing.clicked.connect(self.setup_drawing)
+        self.btn_start_drawing.setVisible(False)  # Ẩn lúc đầu
+        self.layout.addWidget(self.btn_start_drawing)
 
-        central_widget.setLayout(layout)
+        central_widget.setLayout(self.layout)
         self.setCentralWidget(central_widget)
 
         self.selected_image = None
         self.selected_image_path = None
         self.resized_image = None
-        self.sketch_image = None
+        self.pure_sketch = None
 
-        # Định nghĩa kích thước nền full screen (ví dụ 1920x1080)
-        self.background_w = 1920
-        self.background_h = 1080
-        # Tạo ảnh nền (ví dụ: nền trắng) hoặc load ảnh nền cố định
-        # Ở đây tạm thời tạo nền trắng
-        self.background_image = np.ones((self.background_h, self.background_w, 3), dtype=np.uint8)*255
+        self.start_x = 0
+        self.start_y = 0
+
+        # Ảnh hiển thị trong quá trình vẽ
+        self.display_img = None
+        self.all_drawing_instructions = []
+
+        # Tham số độ dày nét vẽ và tốc độ vẽ (batch_size)
+        self.line_thickness = 1
+        self.draw_batch_size = 50
+
+        # Timer để vẽ dần dần
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.draw_next_pixels)
+        self.current_layer_index = 0
+        self.current_pixel_index = 0
 
     def choose_image_source(self):
         source = self.source_combo.currentText()
@@ -165,16 +174,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Cảnh báo", "Bạn chưa chọn ảnh!")
             return
 
-        # Yêu cầu người dùng nhập chiều rộng hoặc chiều cao
-        # Ví dụ: cho phép nhập chiều rộng, tính chiều cao theo tỷ lệ
         w, h = self.selected_image.shape[1], self.selected_image.shape[0]
-
         new_width, ok = QInputDialog.getInt(self, "Nhập chiều rộng mới", "Chiều rộng:", value=w, min=10, max=10000)
         if ok:
             ratio = new_width / w
             new_height = int(h * ratio)
             self.resized_image = cv2.resize(self.selected_image, (new_width, new_height))
-            # Lưu ảnh resized
             input_image_path = os.path.join(self.data_folder, "input_img.jpg")
             cv2.imwrite(input_image_path, self.resized_image)
             self.selected_image_path = input_image_path
@@ -196,40 +201,50 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Cảnh báo", "Chưa có ảnh resized để chuyển sketch!")
             return
 
-        # Chuyển ảnh resized thành sketch
-        sketch = self.image_processor.to_sketch(self.resized_image)
-
-        # Bây giờ đặt ảnh sketch vào giữa nền background
-        # Tính toán vị trí để đặt vào giữa
-        bg_h, bg_w = self.background_image.shape[:2]
-        h, w = sketch.shape[:2]
-        start_x = (bg_w - w)//2
-        start_y = (bg_h - h)//2
-
-        # Tạo một bản sao nền
-        composed = self.background_image.copy()
-
-        # Ở đây, ảnh sketch hiện là nét đen trên nền trắng.  
-        # Dán sketch vào nền
-        composed[start_y:start_y+h, start_x:start_x+w] = sketch
-
-        # Lưu ảnh này
+        pure_sketch = self.image_processor.to_sketch(self.resized_image)
         sketch_path = os.path.join(self.sketch_data_folder, "final_sketch.jpg")
-        cv2.imwrite(sketch_path, sketch)
+        cv2.imwrite(sketch_path, pure_sketch)
+        self.pure_sketch = pure_sketch.copy()
 
-        self.sketch_image = composed.copy()
+        bg_h, bg_w = self.background_image.shape[:2]
+        h, w = self.pure_sketch.shape[:2]
+        self.start_x = (bg_w - w)//2
+        self.start_y = (bg_h - h)//2
 
-        # Hiển thị nó trong DrawingWidget
-        self.drawing_widget = DrawingWidget()
-        # Ở giai đoạn này chưa set data vì chưa có result.npz
-        self.drawing_widget.set_data([], self.sketch_image)
-        self.setCentralWidget(self.drawing_widget)
+        composed = self.background_image.copy()
+        composed[self.start_y:self.start_y+h, self.start_x:self.start_x+w] = self.pure_sketch
 
-        # Cho phép bắt đầu vẽ sau khi đã chuyển sketch
+        self.display_img = composed.copy()
+
+        self.show_image(self.display_img, self.image_label)
+        self.image_label.setVisible(True)
+
+        # Sau khi chuyển sketch, hiển thị nút Bắt đầu Vẽ
+        self.btn_start_drawing.setVisible(True)
         self.btn_start_drawing.setEnabled(True)
 
+    def show_image(self, img, label_widget):
+        h, w, c = img.shape
+        qimg = QImage(img.data, w, h, 3*w, QImage.Format_BGR888)
+        pixmap = QPixmap.fromImage(qimg)
+        label_widget.setPixmap(pixmap)
+        label_widget.setAlignment(Qt.AlignCenter)
+
+    def setup_drawing(self):
+        # Hỏi độ dày nét vẽ
+        thickness, ok = QInputDialog.getInt(self, "Nét vẽ", "Nhập độ dày nét vẽ (>=1):", value=1, min=1, max=20)
+        if ok:
+            self.line_thickness = thickness
+
+        # Hỏi tốc độ vẽ (batch_size)
+        speed, ok = QInputDialog.getInt(self, "Tốc độ vẽ", "Nhập số pixel vẽ mỗi lần (càng nhỏ càng chậm):", value=50, min=1, max=1000)
+        if ok:
+            self.draw_batch_size = speed
+
+        # Gọi hàm start_drawing để xử lý result.npz và bắt đầu vẽ
+        self.start_drawing()
+
     def start_drawing(self):
-        # Tải result.npz
         result_file = "result.npz"
         if not os.path.exists(result_file):
             QMessageBox.warning(self, "Lỗi", "Không tìm thấy file kết quả segment result.npz!")
@@ -252,6 +267,81 @@ class MainWindow(QMainWindow):
             sorted_parts = self.priority_handler.sort_parts(c_name, parts)
             final_objects.append((obj["label"], sorted_parts))
 
-        # Lúc này DrawingWidget đã có self.sketch_image, ta truyền dữ liệu đối tượng vào
-        self.drawing_widget.set_data(final_objects, self.sketch_image)
-        self.drawing_widget.start_drawing()
+        # Xóa vùng sketch (trắng)
+        h, w = self.pure_sketch.shape[:2]
+        self.display_img[self.start_y:self.start_y+h, self.start_x:self.start_x+w] = (255,255,255)
+        self.show_image(self.display_img, self.image_label)
+
+        pure_sketch_gray = cv2.cvtColor(self.pure_sketch, cv2.COLOR_BGR2GRAY)
+        self.all_drawing_instructions = []
+        for label, parts in final_objects:
+            for part_name, mask in parts:
+                layers = self.extract_layers_from_mask(mask, pure_sketch_gray)
+                for layer_pixels in layers:
+                    offset_layer = [(x+self.start_x, y+self.start_y) for (x,y) in layer_pixels]
+                    self.all_drawing_instructions.append((label, part_name, offset_layer))
+
+        # Reset chỉ số vẽ
+        self.current_layer_index = 0
+        self.current_pixel_index = 0
+        self.timer.start(20)
+
+    def draw_next_pixels(self):
+        if self.current_layer_index >= len(self.all_drawing_instructions):
+            self.timer.stop()
+            return
+
+        pixels = self.all_drawing_instructions[self.current_layer_index][2]
+        end_index = min(self.current_pixel_index + self.draw_batch_size, len(pixels))
+        for i in range(self.current_pixel_index, end_index):
+            x, y = pixels[i]
+            self.draw_pixel_with_thickness(x, y, (0,0,0), self.line_thickness)
+
+        self.current_pixel_index = end_index
+        self.show_image(self.display_img, self.image_label)
+
+        if self.current_pixel_index >= len(pixels):
+            self.current_layer_index += 1
+            self.current_pixel_index = 0
+            if self.current_layer_index >= len(self.all_drawing_instructions):
+                self.timer.stop()
+
+    def draw_pixel_with_thickness(self, x, y, color, thickness=1):
+        # Vẽ một ô vuông dày 'thickness' pixel
+        # Đảm bảo không vượt ra ngoài ảnh
+        half = thickness//2
+        h, w, c = self.display_img.shape
+        x_start = max(x-half, 0)
+        y_start = max(y-half, 0)
+        x_end = min(x-half+thickness, w)
+        y_end = min(y-half+thickness, h)
+        self.display_img[y_start:y_end, x_start:x_end] = color
+
+    def extract_layers_from_mask(self, mask, sketch_gray):
+        layers = []
+        current_mask = mask.copy()
+        threshold_black = 50
+        kernel = np.ones((3,3), np.uint8)
+
+        while True:
+            contours, _ = cv2.findContours(current_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            if len(contours) == 0:
+                break
+
+            contour_pixels = []
+            for cnt in contours:
+                for pt in cnt:
+                    x, y = pt[0]
+                    if sketch_gray[y, x] < threshold_black:
+                        contour_pixels.append((x,y))
+
+            if len(contour_pixels) > 0:
+                contour_pixels.sort(key=lambda p: p[1]*10000+p[0])
+                layers.append(contour_pixels)
+
+            eroded = cv2.erode(current_mask, kernel, iterations=1)
+            if np.all(eroded == 0):
+                break
+            current_mask = eroded
+
+        return layers
