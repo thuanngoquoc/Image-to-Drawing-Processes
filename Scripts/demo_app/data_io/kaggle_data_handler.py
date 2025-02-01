@@ -8,7 +8,7 @@ class KaggleDataHandler:
         self.api.authenticate()
 
     def upload_image(self, dataset_slug, image_path):
-        local_dataset_folder = "data_folder"  # dùng đường dẫn tương đối
+        local_dataset_folder = "data_folder"  
         metadata_path = os.path.join(local_dataset_folder, "dataset-metadata.json")
         if not os.path.exists(metadata_path):
             raise FileNotFoundError("dataset-metadata.json không tồn tại trong data_folder")

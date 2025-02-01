@@ -12,26 +12,9 @@ class KaggleSegmentProcessor(SegmentProcessor):
         self.dataset_slug = dataset_slug
 
     def run_segmentation(self, image_path):
-        # Giả sử file ảnh đã upload lên Kaggle
-        # Tại Kaggle, bạn có một kernel/notebook đã setup Oneformer + model parts
-        # Và kết quả segment sẽ được lưu vào result.npz trên Kaggle dataset
-        # Ở đây ta giả lập chờ xử lý:
-        # Trong thực tế, bạn cần chạy 1 kernel Kaggle thông qua API hoặc 
-        # script handle (chức năng này Kaggle API không chính thức hỗ trợ)
-        # hoặc sẵn sàng result.npz ngay sau upload nếu dataset dynamic.
-
-        # Giả lập chờ 5s để "xử lý"
         time.sleep(5)
 
-        # Giả lập kết quả segment
-        # Format giả định:
-        # objects = [
-        #   {"class_name":"dog","id":16,"parts":{"head":mask_head(np array), "ear":mask_ear}},
-        #   {"class_name":"car","id":2,"parts":{"frame":mask_frame,"wheel":mask_wheel}},
-        #   {"class_name":"cat","id":15,"parts":{"head":mask_head,"ear":mask_ear}},
-        #   {"class_name":"banana","id":46,"parts":{"whole":mask_banana}} # class không phân bộ phận
-        # ]
-
+    
         # Tạo dữ liệu giả:
         mask_dummy = np.zeros((500,500), dtype=np.uint8)
         # vẽ 1 vòng tròn làm "head"
@@ -45,6 +28,4 @@ class KaggleSegmentProcessor(SegmentProcessor):
             {"class_name":"banana","id":46,"parts":{"whole":mask_dummy.copy()}}
         ]
 
-        # Lưu result.npz giả định ra local (trong thực tế sẽ download từ Kaggle)
-        #np.savez("result.npz", objects=objects)
-        #return "result.npz"
+
